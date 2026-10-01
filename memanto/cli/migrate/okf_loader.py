@@ -14,6 +14,7 @@ are skipped.
 from __future__ import annotations
 
 import errno
+import logging
 import os
 import re
 import stat
@@ -24,6 +25,8 @@ import yaml  # type: ignore[import-untyped]
 
 from memanto.app.services.okf_export_service import ENTRY_DELIMITER
 from memanto.app.utils.atomic_write import okf_bundle_lock
+
+logger = logging.getLogger(__name__)
 
 # Frontmatter must open at the very start of a (stripped) document. ``.*?`` is
 # non-greedy so the first ``\n---`` closes the block even when the body below
@@ -275,19 +278,57 @@ def _load_documents_secure(
 def _load_documents_portable(
     root: Path, original_path: str | Path
 ) -> tuple[Path, list[tuple[Path, str]]]:
-    """Report unsupported platforms without weakening no-follow guarantees."""
+    """Best-effort fallback for platforms without secure dir_fd support."""
     try:
         root_stat = root.lstat()
     except FileNotFoundError:
         raise FileNotFoundError(f"OKF bundle not found: {original_path}")
+        
     if stat.S_ISLNK(root_stat.st_mode):
         raise ValueError(
             f"OKF bundle path must not be a symbolic link: {original_path}"
         )
-    raise RuntimeError(
-        "OKF import is unsupported on this platform because secure import "
-        "requires descriptor-relative no-follow filesystem support."
+
+    logger.warning(
+        "Secure OKF import is unsupported on this platform. "
+        "Falling back to best-effort path resolution."
     )
+
+    if root.is_file():
+        return root.parent, [(root, root.read_text(encoding="utf-8"))]
+
+    memories_dir = root / "memories"
+    if memories_dir.exists():
+        if memories_dir.is_symlink():
+            raise ValueError(
+                f"OKF bundle directory must not be a symbolic link: {memories_dir}"
+            )
+        scan_root = memories_dir if memories_dir.is_dir() else root
+    else:
+        scan_root = root
+
+    documents = []
+    for file_path in sorted(scan_root.rglob("*.md")):
+        if file_path.name.lower() in _SKIP_FILENAMES:
+            continue
+
+        # Best-effort TOCTOU mitigation: check if any part of the path is a symlink
+        current = file_path
+        is_unsafe = False
+        while current != root:
+            if current.is_symlink():
+                is_unsafe = True
+                break
+            current = current.parent
+            
+        if is_unsafe:
+            raise ValueError(
+                f"OKF bundle contains a symbolic-link document or directory: {file_path}"
+            )
+
+        documents.append((file_path, file_path.read_text(encoding="utf-8")))
+
+    return root, documents
 
 
 def load_okf_bundle(path: str | Path) -> dict[str, Any]:

@@ -511,10 +511,12 @@ def test_loader_reads_pinned_root_when_selected_path_is_replaced(tmp_path, monke
     assert export["memories"][0]["body"] == "Ordinary content"
 
 
-def test_loader_reports_unsupported_without_secure_directory_descriptors(
-    tmp_path, monkeypatch
+def test_loader_falls_back_without_secure_directory_descriptors(
+    tmp_path, monkeypatch, caplog
 ):
-    """Unsupported platforms fail explicitly instead of using path checks."""
+    """Unsupported platforms fall back to best-effort path resolution with a warning."""
+    import logging
+    
     bundle = tmp_path / "bundle"
     bundle.mkdir()
     (bundle / "memory.md").write_text("Ordinary content", encoding="utf-8")
@@ -523,8 +525,15 @@ def test_loader_reports_unsupported_without_secure_directory_descriptors(
         False,
     )
 
-    with pytest.raises(RuntimeError, match="OKF import is unsupported"):
-        load_okf_bundle(bundle)
+    with caplog.at_level(logging.WARNING):
+        export = load_okf_bundle(bundle)
+
+    assert any(
+        "Secure OKF import is unsupported on this platform" in record.message 
+        for record in caplog.records
+    )
+    assert len(export["memories"]) == 1
+    assert export["memories"][0]["body"] == "Ordinary content"
 
 
 def test_loader_preserves_nested_document_read_errors(tmp_path, monkeypatch):
